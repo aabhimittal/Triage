@@ -34,7 +34,7 @@ from pathlib import Path
 
 from triage.budget import Budget
 from triage.config import Config
-from triage.model import Verdict
+from triage.model import Label, Verdict
 from triage.mutate import generate_mutants
 from triage.pipeline import TriageReport, run
 from triage.runner import collect_coverage, run_tests
@@ -49,6 +49,7 @@ class InjectedBug:
     hunk_id: str
     verdict: str
     risk: float
+    in_test_code: bool = False
 
     @property
     def escaped(self) -> bool:
@@ -79,14 +80,66 @@ class EvalResult:
     bugs: list[InjectedBug] = field(default_factory=list)
     caught_by_ci: int = 0
     curve: list[CurvePoint] = field(default_factory=list)
+    attempted: set[str] = field(default_factory=set)
+
+    @property
+    def product_bugs(self) -> list[InjectedBug]:
+        return [b for b in self.bugs if not b.in_test_code]
+
+    @property
+    def test_bugs(self) -> list[InjectedBug]:
+        """Mutants planted in test code.
+
+        Kept apart from the headline, and never dropped. A mutant that deletes
+        an assertion survives the suite *by construction* -- no test suite can
+        notice its own degradation -- so pooling these with product-code bugs
+        produces an escape rate that measures an impossibility rather than a
+        miss. Reported on their own line because the underlying risk is real:
+        TRIAGE certifies that a new test detects this change, not that nobody
+        will weaken it next week.
+        """
+        return [b for b in self.bugs if b.in_test_code]
 
     @property
     def escapes(self) -> int:
-        return sum(1 for b in self.bugs if b.escaped)
+        return sum(1 for b in self.product_bugs if b.escaped)
 
     @property
     def escape_rate(self) -> float:
-        return self.escapes / len(self.bugs) if self.bugs else 0.0
+        product = self.product_bugs
+        return self.escapes / len(product) if product else 0.0
+
+    @property
+    def test_escapes(self) -> int:
+        return sum(1 for b in self.test_bugs if b.escaped)
+
+    def to_dataset(self) -> dict:
+        """Labelled rows for `triage fit`.
+
+        Only hunks we actually planted a bug in appear. A hunk we never probed
+        is not a negative example -- it is no example at all, and silently
+        treating it as "no bug here" would train the model to trust exactly the
+        code we failed to examine.
+        """
+        harbouring = {b.hunk_id for b in self.bugs}
+        rows = []
+        for verdict in self.report.verdicts:
+            if verdict.hunk.id not in self.attempted:
+                continue
+            rows.append({
+                "hunk": verdict.hunk.id,
+                "path": verdict.hunk.path,
+                "features": verdict.risk_features,
+                "label": int(verdict.hunk.id in harbouring),
+                "verdict": verdict.verdict.value,
+            })
+        return {
+            "schema": "triage-risk-dataset/1",
+            "repo": self.report.repo,
+            "base": self.report.base,
+            "head": self.report.head,
+            "rows": rows,
+        }
 
     def to_csv(self) -> str:
         buf = io.StringIO()
@@ -149,16 +202,18 @@ def evaluate(
             with patched_file(file_path, mutant.source):
                 run_result = run_tests(workdir, cfg, timeout=cfg.mutant_timeout_seconds * 4)
             budget.charge(run_result.duration)
+            result.attempted.add(hunk_id)
             if run_result.ok:
                 hv = by_hunk[hunk_id]
                 result.bugs.append(InjectedBug(
                     path=mutant.path, line=mutant.lineno, mutation=mutant.label,
                     hunk_id=hunk_id, verdict=hv.verdict.value, risk=hv.risk,
+                    in_test_code=hv.hunk.label is Label.TEST,
                 ))
             else:
                 result.caught_by_ci += 1
 
-    result.curve = _curve(report, result.bugs)
+    result.curve = _curve(report, result.product_bugs)
     return result
 
 
@@ -198,8 +253,16 @@ def format_curve(result: EvalResult) -> str:
         f"bugs injected        {result.caught_by_ci + len(result.bugs)}",
         f"  caught by CI       {result.caught_by_ci} (the suite failed; never a review problem)",
         f"  survived the suite {len(result.bugs)} (a human was the only defence left)",
+        f"  hunks probed       {len(result.attempted)} (only these can be labelled for fitting)",
+        "",
+        f"in product code      {len(result.product_bugs)} surviving bugs",
         f"  ESCAPED TRIAGE     {result.escapes} "
-        f"({100 * result.escape_rate:.1f}% of surviving bugs landed in a verified hunk)",
+        f"({100 * result.escape_rate:.1f}% landed in a verified hunk)",
+        f"in test code         {len(result.test_bugs)} surviving mutants, "
+        f"{result.test_escapes} in verified hunks",
+        "                     (a deleted assertion cannot be noticed by the suite",
+        "                      that contains it, so these survive by construction;",
+        "                      counted separately, not discounted)",
         "",
         "risk threshold sweep (tau=1.00 is the default: review the residual set only)",
         f"{'tau':>6}  {'review burden':>14}  {'escape rate':>12}",

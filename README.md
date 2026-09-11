@@ -19,9 +19,11 @@ PR diff -> hunks
    |                 MS_D = killed mutants in D / viable mutants in D
    |-- Equivalent?   for hunks labelled "refactor": run old vs new on
    |                 generated inputs; every result must match
+   |-- Effective?    for test code: revert the definitions this test
+   |                 references; a test that still passes proves nothing
    v
 Residual set R = hunks that fail *or cannot answer* any check
--> "81% machine-verified; review these 14 lines"
+-> "review 16 of 34 changed lines"
 ```
 
 ## The one invariant
@@ -45,17 +47,19 @@ triage run --repo . --base main --format json   # machine readable
 triage run --base main --fail-on-residual       # CI gate (exit 1 if any)
 ```
 
-See it work end to end on a generated repo containing one of every interesting
-case:
+See it work end to end on generated repos. Two scenarios, because one number in
+isolation misleads:
 
 ```bash
-bash scripts/demo.sh
+bash scripts/demo.sh mature   # a disciplined change: 97% verified, 1 line to review
+bash scripts/demo.sh mixed    # one of every hard case: 53% verified, 16 lines
 ```
 
 ## What the output looks like
 
 ```
-TRIAGE 20% verified  |  6 verified / 24 residual / 2 exempt lines  |  14.3s
+TRIAGE review 16 of 34 changed lines | 53% test-constrained
+                                     | (a fact about this suite, not the change)
   [0.94] cart.py:9-9 (refactor)
         - equivalent: not equivalent: apply_discount(total=100.0, pct=100.0)
           returned 0.0 before and ValueError(percentage out of range) after
@@ -64,11 +68,19 @@ TRIAGE 20% verified  |  6 verified / 24 residual / 2 exempt lines  |  14.3s
   [0.66] cart.py:14-19 (behavioral)
         - constrained: MS_delta=0.12 < 0.80; 7 mutations survive unnoticed:
           num-const @ cart.py:16 ('4.99' -> '5.99'), compare @ cart.py:16 ('<' -> '<=')
+  [0.16] tests/test_cart.py:28-31 (test)
+        - effective: test_subtotal_is_callable still passes with subtotal
+          reverted to the pre-change implementation: it does not pin down any
+          behaviour this PR introduced
 ```
 
-That third one is the interesting case. It is 100% covered, and worthless: the
-only test asserts `isinstance(fee, float)`, so the price can be changed to
-anything and nothing objects. Coverage says green; TRIAGE says *look here*.
+The third one is 100% covered and worthless: the only test asserts
+`isinstance(fee, float)`, so the price can be changed to anything and nothing
+objects. Coverage says green; TRIAGE says *look here*.
+
+**The percentage measures the test suite, not the change and not TRIAGE.** The
+same tool reports 97% on the `mature` demo and 3% on its own greenfield first
+commit. The product is the residual list; the number is context.
 
 ## The three checks
 
@@ -77,6 +89,14 @@ anything and nothing objects. Coverage says green; TRIAGE says *look here*.
 | **covered** | do the tests execute these lines? | ABSTAIN (file unmeasured) |
 | **constrained** | would any test notice if these lines were wrong? | ABSTAIN (too few mutants, budget spent, selected tests not green on their own) |
 | **equivalent** | does a *declared refactor* actually preserve behaviour? | ABSTAIN (impure, unannotated, nondeterministic) |
+| **effective** | does this test detect anything the change did? | ABSTAIN (edit to an existing test, or not inside a test function) |
+
+The fourth one exists because test code cannot be verified by the suite that
+contains it. The one question that *is* mechanically answerable: revert the
+definitions the test references, and see whether it still passes. One that does
+is either testing something that already worked or asserting too little.
+Reverting happens one definition at a time, never one file at a time — reverting
+whole files breaks the module's imports and makes every test look effective.
 
 A hunk is labelled `refactor` only when the author declared it — a commit
 subject starting with `refactor:`/`style:`, or a `# triage: refactor` marker —
@@ -124,6 +144,21 @@ Sweeping the risk threshold traces the whole trade-off curve between review
 burden and escape rate; the product claim is one point on it. Raising
 `mutation_threshold` to 1.0 pushes escapes toward zero and burden up.
 
+## Calibrating the ranking
+
+The shipped risk weights are hand-set priors. To replace them with fitted ones:
+
+```bash
+triage eval --repo . --base main --dataset pr-1234.json   # repeat per PR
+triage fit --dataset pr-*.json --out weights.json
+```
+
+`fit` refuses on samples too small to support an estimate (fewer than 40
+labelled hunks, or fewer than 5 of either class) and reports the fitted ranking
+AUC beside the priors' AUC, so a fit that helps nothing says so. Hunks no bug
+was ever planted in are excluded rather than treated as negatives: a hunk we
+never probed is not evidence that it is clean.
+
 ## Honest limitations
 
 These are real, and none of them are fixed by trying harder:
@@ -142,8 +177,17 @@ These are real, and none of them are fixed by trying harder:
 - **Verified does not mean correct.** It means "the tests constrain this". The
   code can still be the wrong feature with a bad interface. TRIAGE narrows the
   queue; it does not raise the ceiling.
-- **Python only**, for the mutation and equivalence checks. Coverage-based
-  triage generalises; the operators do not.
+- **A verified test can still be weakened later.** The effectiveness check
+  certifies that a new test detects *this* change. Nothing stops someone
+  deleting an assertion next week, and no test suite can notice its own
+  degradation. `triage eval` counts test-code mutants separately for exactly
+  this reason, and reports them rather than discounting them.
+- **Edited tests are never verified**, only newly added ones: a test can be
+  weakened and still fail against the old code, because the PR also changed the
+  behaviour it covers.
+- **Python only**, for everything except the coverage gate. Non-Python files are
+  residual by design and say so — "no analyser for .sh files" — rather than
+  arriving there through a misleading coverage message.
 
 ## Configuration
 

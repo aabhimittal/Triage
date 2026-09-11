@@ -19,7 +19,8 @@ _LIMITS = """\
 **Verified** here means: every line in the hunk is executed by the test suite,
 and mutating those lines makes the suite fail. For hunks labelled *refactor* it
 can also mean: the old and new implementations returned identical results on
-generated inputs.
+generated inputs. For test code it means: the test fails when the definitions
+it references are reverted, so it constrains something this change did.
 
 It does **not** mean the code is correct. A hunk can be verified and still be
 the wrong feature, a bad interface, or a performance cliff. TRIAGE narrows the
@@ -27,9 +28,12 @@ queue; it does not raise the ceiling.
 
 Specifically out of reach: anything whose effects are not observable through
 return values and test outcomes (I/O, database writes, logging), concurrency
-bugs that need a schedule to surface, and anything the test suite itself gets
-wrong. Hunks we could not judge are listed as residual with the reason, never
-silently counted as safe.
+bugs that need a schedule to surface, non-Python files (there is no analyser
+for them here, and they are listed as residual saying exactly that), and
+anything the test suite itself gets wrong. An edited -- as opposed to newly
+added -- test is always residual, because failing against the old code does not
+rule out an assertion having been weakened. Hunks we could not judge are listed
+as residual with the reason, never silently counted as safe.
 </details>"""
 
 
@@ -50,8 +54,15 @@ def to_markdown(report: TriageReport, max_residual: int = 25) -> str:
 
     residual = report.residual[:max_residual]
     pct = round(100 * s.verified_fraction)
+    judged = s.verified_lines + s.residual_lines
     lines = [
-        f"## TRIAGE: {pct}% machine-verified, review {s.residual_lines} line(s)",
+        f"## TRIAGE: review {s.residual_lines} of {judged} changed line(s)",
+        "",
+        f"{pct}% of the changed executable lines are constrained by the test "
+        "suite and need no human on the correctness axis. That percentage is a "
+        "property of **this repository's tests**, not of the change and not of "
+        "TRIAGE: the same tool reports 97% on a disciplined diff and 3% on a "
+        "greenfield one. Read the residual list, not the number.",
         "",
         f"| verified | residual | exempt | hunks | mutants | wall |",
         f"|---:|---:|---:|---:|---:|---:|",
@@ -120,9 +131,11 @@ def to_text(report: TriageReport) -> str:
     if not report.suite_green:
         return "SUITE RED — no verification possible. Fix CI first."
     head = (
-        f"TRIAGE {round(100 * s.verified_fraction)}% verified  |  "
-        f"{s.verified_lines} verified / {s.residual_lines} residual / "
-        f"{s.exempt_lines} exempt lines  |  {s.wall_seconds:.1f}s"
+        f"TRIAGE review {s.residual_lines} of "
+        f"{s.verified_lines + s.residual_lines} changed lines  |  "
+        f"{round(100 * s.verified_fraction)}% test-constrained "
+        f"(a fact about this suite, not about the change)  |  "
+        f"{s.exempt_lines} exempt  |  {s.wall_seconds:.1f}s"
     )
     rows = [head, "-" * len(head)]
     for hv in report.residual:

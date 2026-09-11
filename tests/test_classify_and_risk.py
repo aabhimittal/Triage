@@ -72,3 +72,18 @@ def test_a_disproved_refactor_claim_dominates_the_score():
                  [CheckResult("equivalent", Status.FAIL, "", {})])
     assert f["broken_refactor_claim"] == 1.0
     assert model.score(f) > 0.5
+
+
+def test_a_test_that_proves_nothing_outranks_an_ordinary_test_edit():
+    model = RiskModel.load(None)
+    useless = hunk("tests/test_m.py", {1: "    assert callable(f)"})
+    useless.label = Label.TEST
+    ordinary = hunk("tests/test_m.py", {1: "    assert f(2) == 4"})
+    ordinary.label = Label.TEST
+
+    failed = CheckResult("effective", Status.FAIL, "detects nothing", {})
+    abstained = CheckResult("effective", Status.ABSTAIN, "existing test edited", {})
+
+    assert model.score(features(useless, [failed])) > model.score(
+        features(ordinary, [abstained])
+    )
