@@ -1,0 +1,14 @@
+# TRIAGE configuration for this repo (it triages itself; see scripts/demo.sh).
+[triage]
+test_command = ["pytest", "-q", "--no-header", "-p", "no:cacheprovider"]
+source_roots = ["triage"]
+test_paths = ["tests"]
+
+coverage_threshold = 1.0
+mutation_threshold = 0.8
+min_mutants = 2
+
+mutation_budget_seconds = 240.0
+max_mutants_per_hunk = 10
+mutant_timeout_seconds = 30.0
+equivalence_cases = 64
