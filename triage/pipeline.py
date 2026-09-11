@@ -125,8 +125,11 @@ def run(
         model = RiskModel.load(cfg.risk_weights_path)
 
         verdicts: list[HunkVerdict] = []
+        sanity_cache: dict[tuple[str, ...], bool] = {}
         for hunk in hunks:
-            checks = _run_checks(hunk, workdir, repo, base, index, cfg, budget, suite_green)
+            checks = _run_checks(
+                hunk, workdir, repo, base, index, cfg, budget, suite_green, sanity_cache
+            )
             hv = decide(hunk, checks, suite_green=suite_green)
             hv.risk_features = features(hunk, checks, churn_count=gitutil.churn(repo, hunk.path))
             hv.risk = model.score(hv.risk_features)
@@ -170,6 +173,7 @@ def _run_checks(
     cfg: Config,
     budget: Budget,
     suite_green: bool,
+    sanity_cache: dict[tuple[str, ...], bool] | None = None,
 ) -> list[CheckResult]:
     if hunk.label in (Label.DOCS, Label.CONFIG) or not has_executable_change(hunk):
         return []
@@ -178,7 +182,9 @@ def _run_checks(
 
     checks = [coverage_check.check(hunk, index, cfg.coverage_threshold)]
     if checks[0].status is Status.PASS:
-        checks.append(mutation_check.check(hunk, workdir, index, cfg, budget))
+        checks.append(
+            mutation_check.check(hunk, workdir, index, cfg, budget, sanity_cache)
+        )
     else:
         # Skip the expensive check when the cheap gate already failed: an
         # uncovered line cannot be constrained, so the answer is known.

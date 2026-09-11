@@ -37,7 +37,18 @@ def check(
     index: CoverageIndex,
     cfg: Config,
     budget: Budget,
+    sanity_cache: dict[tuple[str, ...], bool] | None = None,
 ) -> CheckResult:
+    if budget.exhausted:
+        # Checked here, before any test process is spawned. Checking it only
+        # inside the mutant loop made the budget advisory rather than binding:
+        # every later hunk still paid for a full sanity run before abstaining,
+        # so a large diff burned minutes producing nothing but ABSTAINs.
+        return CheckResult(
+            NAME, Status.ABSTAIN,
+            "mutation budget was already spent before this hunk was reached",
+            {"budget_remaining_s": 0.0},
+        )
     if not hunk.path.endswith(".py"):
         return CheckResult(NAME, Status.ABSTAIN, "mutation operators are Python-only", {})
 
@@ -64,16 +75,22 @@ def check(
     # the hunk is stamped VERIFIED on the strength of a broken test run.
     all_impacted = sorted(index.tests_for(hunk.path, executable))
     if all_impacted:
-        sanity = run_tests(workdir, cfg, node_ids=all_impacted,
-                           timeout=cfg.mutant_timeout_seconds * 2)
-        budget.charge(sanity.duration)
-        if not sanity.ok:
+        cache = sanity_cache if sanity_cache is not None else {}
+        key = tuple(all_impacted)
+        if key not in cache:
+            # Hunks in one file routinely select the same tests, and this guard
+            # costs a full test run each time, so memoise it for the run.
+            sanity = run_tests(workdir, cfg, node_ids=all_impacted,
+                               timeout=cfg.mutant_timeout_seconds * 2)
+            budget.charge(sanity.duration)
+            cache[key] = sanity.ok
+        if not cache[key]:
             return CheckResult(
                 NAME, Status.ABSTAIN,
                 "the tests covering these lines do not pass when run on their own "
                 "(order-dependent, flaky, or an import problem), so a mutant kill "
                 "would prove nothing",
-                {"selected_tests": all_impacted[:10], "output": sanity.output[-800:]},
+                {"selected_tests": all_impacted[:10]},
             )
 
     killed: list[str] = []

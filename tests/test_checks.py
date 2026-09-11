@@ -75,3 +75,38 @@ def test_context_names_resolve_to_runnable_node_ids():
     assert context_to_node_id("test_a.TestX.test_y", modules) == "tests/test_a.py::TestX::test_y"
     assert context_to_node_id("tests.test_a.test_y", modules) == "tests/test_a.py::test_y"
     assert context_to_node_id("", modules) is None
+
+
+def test_mutation_check_respects_an_exhausted_budget_without_running_anything(tmp_path):
+    """The budget must bind before any subprocess is spawned, not after."""
+    from triage.budget import Budget
+    from triage.checks.mutation_check import check as mutation
+
+    spent = Budget(total_seconds=10.0, spent=10.0)
+    result = mutation(hunk(added={1: "x = 1"}), tmp_path, index_with([1], [1]),
+                      Config(), spent)
+    assert result.status is Status.ABSTAIN
+    assert "budget" in result.detail
+
+
+def test_sanity_guard_result_is_reused_across_hunks(tmp_path, monkeypatch):
+    from triage import checks
+    from triage.budget import Budget
+    from triage.checks import mutation_check
+
+    calls = []
+
+    def fake_run(workdir, cfg, node_ids=None, timeout=None, env=None):
+        calls.append(tuple(node_ids or ()))
+        from triage.runner import TestRunResult
+        return TestRunResult(ok=False, returncode=1, duration=0.01)
+
+    monkeypatch.setattr(mutation_check, "run_tests", fake_run)
+    (tmp_path / "m.py").write_text("def f(a: int) -> int:\n    return a + 1\n")
+    idx = index_with([1, 2], [1, 2], {2: {"tests/t.py::test_a"}})
+    cache: dict = {}
+    for _ in range(3):
+        r = mutation_check.check(hunk(added={2: "    return a + 1"}), tmp_path, idx,
+                                 Config(), Budget(60.0), cache)
+        assert r.status is Status.ABSTAIN
+    assert len(calls) == 1, "the sanity run should be memoised per test selection"
