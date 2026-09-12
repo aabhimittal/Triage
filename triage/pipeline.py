@@ -8,7 +8,12 @@ from pathlib import Path
 
 from triage import gitutil
 from triage.budget import Budget
-from triage.checks import coverage_check, equivalence_check, mutation_check
+from triage.checks import (
+    coverage_check,
+    equivalence_check,
+    mutation_check,
+    test_effect_check,
+)
 from triage.classify import classify, excluded, has_executable_change
 from triage.config import Config
 from triage.diffparse import parse_diff
@@ -124,11 +129,13 @@ def run(
         budget = Budget(cfg.mutation_budget_seconds)
         model = RiskModel.load(cfg.risk_weights_path)
 
+        base_sources = _base_sources(repo, base, hunks)
         verdicts: list[HunkVerdict] = []
         sanity_cache: dict[tuple[str, ...], bool] = {}
         for hunk in hunks:
             checks = _run_checks(
-                hunk, workdir, repo, base, index, cfg, budget, suite_green, sanity_cache
+                hunk, workdir, repo, base, index, cfg, budget, suite_green,
+                sanity_cache, base_sources,
             )
             hv = decide(hunk, checks, suite_green=suite_green)
             hv.risk_features = features(hunk, checks, churn_count=gitutil.churn(repo, hunk.path))
@@ -145,6 +152,27 @@ def run(
         suite_green=suite_green,
         suite_output="" if suite_green else (index.baseline.output if index.baseline else ""),
     )
+
+
+def _base_sources(repo: Path, base: str, hunks: list[Hunk]) -> dict[str, str | None]:
+    """Pre-change content of every non-test Python file the diff touches.
+
+    This is what the test-effectiveness check reverts to. Restricted to Python
+    source: reverting a lockfile or CI config alongside it would change what is
+    being asked from "does this test detect the code change" to something much
+    vaguer.
+    """
+    try:
+        anchor = gitutil.merge_base(repo, base)
+    except gitutil.GitError:
+        anchor = base
+    out: dict[str, str | None] = {}
+    for hunk in hunks:
+        if hunk.label is Label.TEST or not hunk.path.endswith(".py"):
+            continue
+        if hunk.path not in out:
+            out[hunk.path] = gitutil.show(repo, anchor, hunk.path)
+    return out
 
 
 def _refactor_oracle(repo: Path, base: str, head: str, diff_text: str | None):
@@ -174,11 +202,35 @@ def _run_checks(
     budget: Budget,
     suite_green: bool,
     sanity_cache: dict[tuple[str, ...], bool] | None = None,
+    base_sources: dict[str, str | None] | None = None,
 ) -> list[CheckResult]:
     if hunk.label in (Label.DOCS, Label.CONFIG) or not has_executable_change(hunk):
         return []
     if not suite_green:
         return []  # every check downstream would be measuring a broken baseline
+
+    if not hunk.path.endswith(".py"):
+        # Said explicitly rather than left to fall out of "coverage found
+        # nothing". Non-Python files are residual by design here, because the
+        # analysers that could verify them do not exist, and a reader deserves
+        # that reason instead of a misleading coverage message.
+        suffix = Path(hunk.path).suffix or "(no extension)"
+        return [CheckResult(
+            "scope", Status.ABSTAIN,
+            f"no analyser for {suffix} files: coverage, mutation and equivalence "
+            "are Python-only here, so nothing about this change can be machine-checked",
+            {"path": hunk.path},
+        )]
+
+    if hunk.label is Label.TEST:
+        # Mutating test code is meaningless -- killing a mutant in an assertion
+        # would require some *other* test to notice, which is not what the suite
+        # is for. The one answerable question is whether the test detects this
+        # PR's change at all.
+        return [test_effect_check.check(
+            hunk, workdir, base_sources or {},
+            gitutil.show(repo, gitutil.merge_base(repo, base), hunk.path), cfg,
+        )]
 
     checks = [coverage_check.check(hunk, index, cfg.coverage_threshold)]
     if checks[0].status is Status.PASS:

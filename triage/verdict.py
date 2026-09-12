@@ -51,6 +51,14 @@ def decide(
         )
 
     if hunk.label is Label.TEST:
+        # A test cannot be verified by the suite that contains it, but it can be
+        # run against the pre-change implementation. A new test that fails there
+        # demonstrably constrains what the PR did; anything less stays residual.
+        effective = _get(checks, "effective")
+        if effective is not None and effective.status is Status.PASS:
+            return HunkVerdict(hunk, Verdict.VERIFIED, checks)
+        if effective is not None and effective.status is Status.FAIL:
+            return HunkVerdict(hunk, Verdict.RESIDUAL, checks)
         return HunkVerdict(
             hunk, Verdict.RESIDUAL,
             checks + [CheckResult(

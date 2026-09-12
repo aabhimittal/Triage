@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -41,11 +42,25 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.add_argument("--bugs", type=int, default=25, help="max bugs to inject")
     eval_cmd.add_argument("--seed", type=int, default=0)
     eval_cmd.add_argument("--out", type=Path, help="write the curve as CSV")
+    eval_cmd.add_argument(
+        "--dataset", type=Path,
+        help="write labelled hunks here, for `triage fit`",
+    )
+
+    fit_cmd = sub.add_parser(
+        "fit", help="fit risk-ranking weights from one or more eval datasets"
+    )
+    fit_cmd.add_argument("--dataset", type=Path, nargs="+", required=True)
+    fit_cmd.add_argument("--out", type=Path, help="write fitted weights as JSON")
+    fit_cmd.add_argument("--l2", type=float, default=1.0, help="ridge penalty")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "fit":  # the only command that works without a repo
+        return _fit(args)
+
     repo = Path(args.repo).resolve()
     cfg = Config.load(repo)
 
@@ -78,8 +93,31 @@ def main(argv: list[str] | None = None) -> int:
         if args.out:
             args.out.write_text(outcome.to_csv())
             print(f"wrote {args.out}", file=sys.stderr)
+        if args.dataset:
+            args.dataset.write_text(json.dumps(outcome.to_dataset(), indent=2))
+            print(f"wrote {args.dataset}", file=sys.stderr)
         return 0
+
     return 2
+
+
+def _fit(args) -> int:
+    from triage.fit import FitRefused, fit, load_datasets
+
+    try:
+        report = fit(load_datasets(args.dataset), l2=args.l2)
+    except FitRefused as exc:
+        print(f"refusing to fit: {exc}", file=sys.stderr)
+        return 3
+    print(report.render())
+    if args.out:
+        args.out.write_text(json.dumps(report.weights, indent=2))
+        print(f"wrote {args.out}", file=sys.stderr)
+        print(
+            f'point .triage.toml at it with risk_weights_path = "{args.out}"',
+            file=sys.stderr,
+        )
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

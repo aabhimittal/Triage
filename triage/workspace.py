@@ -40,3 +40,30 @@ def patched_file(path: Path, new_text: str) -> Iterator[None]:
         yield
     finally:
         path.write_bytes(original)
+
+
+@contextmanager
+def reverted_files(workdir: Path, base_sources: dict[str, str | None]) -> Iterator[None]:
+    """Temporarily restore files to their pre-change content.
+
+    A value of None means the file did not exist before the change, so
+    reverting it means removing it. Everything is restored on exit, including
+    after an exception, because the workspace is reused for later hunks.
+    """
+    saved: dict[Path, bytes | None] = {}
+    try:
+        for rel, old in base_sources.items():
+            path = workdir / rel
+            saved[path] = path.read_bytes() if path.exists() else None
+            if old is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(old)
+        yield
+    finally:
+        for path, original in saved.items():
+            if original is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(original)

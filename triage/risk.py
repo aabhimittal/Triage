@@ -37,6 +37,10 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "mutant_survival": 2.0,
     # A refactor that provably is not one. Rare, and nearly always a real bug.
     "broken_refactor_claim": 3.0,
+    # A test demonstrated to detect nothing the change did. Not a bug in the
+    # product, but a hole in the evidence the PR claims to be adding, and the
+    # one finding a reviewer can act on immediately.
+    "ineffective_test": 1.6,
     # We could not run a check at all: absence of evidence, weighted as mild risk.
     "unknown_frac": 0.8,
     # Structural priors.
@@ -102,6 +106,9 @@ def features(
     equiv = by_name.get("equivalent")
     broken_refactor = 1.0 if (equiv is not None and equiv.status is Status.FAIL) else 0.0
 
+    effective = by_name.get("effective")
+    ineffective = 1.0 if (effective is not None and effective.status is Status.FAIL) else 0.0
+
     inconclusive = [c for c in checks if c.status is Status.ABSTAIN]
     applicable = [c for c in checks if c.status is not Status.SKIP] or [None]
     unknown_frac = len(inconclusive) / len(applicable)
@@ -110,6 +117,7 @@ def features(
         "uncovered_frac": uncovered_frac,
         "mutant_survival": survival,
         "broken_refactor_claim": broken_refactor,
+        "ineffective_test": ineffective,
         "unknown_frac": unknown_frac,
         "size": min(1.0, hunk.size / 50.0),
         "branchiness": _branchiness(text),

@@ -46,9 +46,28 @@ price in the function can be changed freely and the suite stays green.
 
 **Equivalent?** For a hunk whose author *declared* a refactor: do the old and
 new implementations agree on generated inputs? Narrow reach, sharp teeth. It is
-the only check that can verify a hunk on its own, because behavioural
+one of two checks that can verify a hunk on its own, because behavioural
 equivalence makes the coverage question moot: if nothing observable changed,
 there is nothing for a reviewer to find.
+
+**Effective?** For test code, where the other three are meaningless. Mutating a
+test is incoherent — killing a mutant in an assertion would require some *other*
+test to object — and coverage of a test file measures nothing. The answerable
+question is the one a careful reviewer asks anyway: *does this test fail for the
+right reason?* Revert the definitions the test references, run it, and a test
+that still passes has told you nothing about the change.
+
+The implementation detail that makes or breaks this check is granularity.
+Reverting whole files is the obvious approach and it is useless: a test module
+imports several names at once, so removing the file's new definitions breaks the
+import and *every* test in it fails, which reads as "every test is effective".
+Reverting one definition at a time — and only the ones the test under
+examination actually references — keeps the module importable, so the result is
+attributable to the behaviour under test. See `triage/revert.py`.
+
+The check is conclusive only for *newly added* tests. An edit to an existing
+test can weaken it while still failing against old code, because the PR changed
+the behaviour it covers; those stay residual.
 
 ## 3. The safety argument
 
@@ -150,12 +169,29 @@ groups:
 - **domain**: names matching auth/crypto/payment/SQL patterns, error handling,
   concurrency.
 
-The weights are hand-set priors, stated as data in `triage/risk.py` and
-overridable from JSON. **Do not read the absolute numbers as probabilities.**
-The ordering is the product. `triage eval` produces the labelled data
-(`escaped` per injected bug) needed to fit them properly; that fit is not done
-here, and claiming otherwise would be the kind of unearned precision this tool
-exists to avoid.
+The weights ship as hand-set priors, stated as data in `triage/risk.py`.
+`triage fit` replaces them with values learned from `triage eval` datasets:
+each probed hunk contributes its features and a label saying whether a bug
+planted there survived the suite.
+
+Two properties of the fitter matter more than the arithmetic:
+
+*It refuses.* Logistic regression returns coefficients from nine rows and one
+positive just as readily as from ten thousand, and the output looks equally
+authoritative either way. A tool premised on never claiming more confidence
+than the evidence supports cannot then ship a model fitted on noise, so `fit`
+raises rather than guessing below 40 labelled hunks or 5 per class. It also
+prints the fitted ranking AUC next to the priors' AUC, so a fit that improves
+nothing announces it.
+
+*Unprobed hunks are not negatives.* Only hunks a bug was actually planted in
+are labelled. Treating the rest as "no bug here" would train the model to trust
+precisely the code the evaluation failed to examine — the same absence-of-
+evidence error the ABSTAIN status exists to prevent, smuggled in as training
+data.
+
+**Do not read the absolute numbers as probabilities.** The ordering is the
+product.
 
 ## 8. Evaluation
 
@@ -170,6 +206,14 @@ for each candidate bug planted in the diff:
                     residual set (caught) or a verified hunk (ESCAPED)?
 ```
 
+Product code and test code are counted separately, and both are reported. A
+mutant that deletes an assertion from a test survives the suite *by
+construction* — no suite can notice its own degradation — so pooling those with
+product-code bugs yields an "escape rate" measuring an impossibility. They are
+not discounted either: the underlying risk is real, and the effectiveness check
+certifies that a new test detects *this* change, not that nobody weakens it
+later.
+
 Sweeping the risk threshold `tau` — below which even verified hunks are added
 back to the review queue — traces the curve between `review burden` and
 `escape rate`. It has the shape of a precision/recall curve, and any product
@@ -182,17 +226,34 @@ requirements, missing cases, and races — the defects that make human review
 worth having. A good escape rate is necessary for the claim and nowhere near
 sufficient.
 
-## 9. What is deliberately missing
+## 9. The headline number is a property of the repository
 
-- **Test-code verification.** A weakened assertion still passes the suite that
-  contains it, so test edits are always residual. A real check exists — run the
-  new test against the *old* implementation and require it to fail — and would
-  be the highest-value next addition.
-- **Fitted risk weights.** The harness produces the labels; the fit is not done.
+`97% machine-verified` is not a claim about TRIAGE and not a claim about the
+diff. It is a measurement of the *test suite* the diff landed in. The same
+binary reports 97% on the `mature` demo, 65% on the `mixed` one, and 3% on
+TRIAGE's own first commit, where nothing had tests yet — and all three are
+correct.
+
+This matters because the number is the part people quote. The reports therefore
+lead with the actionable quantity (*review 12 of 34 changed lines*) and carry
+the percentage as context with that caveat attached, rather than the reverse.
+A tool that sells itself on a number it does not control will be caught out by
+the first reviewer who runs it on a legacy module.
+
+## 10. What is deliberately missing
+
 - **Languages other than Python.** The coverage-and-impact layer generalises;
-  the mutation operators and the purity analyser do not.
+  the mutation operators, the purity analyser and the definition-level reverter
+  do not. Non-Python hunks are residual with an explicit "no analyser for this
+  file type" reason, which is honest but is not analysis.
 - **Cross-hunk reasoning.** Each hunk is judged alone. A change that is
   individually verified in two places can still be wrong in combination, and
   nothing here will notice.
 - **Incremental caching.** Every run re-derives coverage from scratch. Caching
   by content hash is straightforward and not implemented.
+- **A fitted model in the box.** The fitter exists and refuses small samples,
+  which means shipping fitted weights requires evaluation runs across many real
+  PRs. That data does not exist yet, so the priors are still what ships.
+- **Property-based assertions.** The equivalence check generates inputs but only
+  compares two implementations. Checking a single implementation against stated
+  invariants would extend the same machinery to non-refactor changes.

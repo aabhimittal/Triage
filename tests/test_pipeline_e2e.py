@@ -93,3 +93,59 @@ def test_a_red_suite_blocks_every_verification(tiny_repo: Path):
     assert not report.suite_green
     assert report.verified == []
     assert "SUITE RED" in to_text(report)
+
+
+def test_a_test_that_detects_nothing_is_separated_from_one_that_does(tiny_repo):
+    """The whole point of the effectiveness check, end to end."""
+    git(tiny_repo, "checkout", "-qb", "tests-feature")
+    (tiny_repo / "lib.py").write_text(
+        "def double(n: int) -> int:\n"
+        "    return n * 2\n"
+        "\n"
+        "\n"
+        "def halve(n: int) -> int:\n"
+        "    return n // 2\n"
+    )
+    (tiny_repo / "tests" / "test_lib.py").write_text(
+        "from lib import double, halve\n"
+        "\n"
+        "def test_double():\n"
+        "    assert double(3) == 6\n"
+        "    assert double(0) == 0\n"
+        "    assert double(-2) == -4\n"
+        "\n"
+        "def test_halve_exact():\n"
+        "    assert halve(4) == 2\n"
+        "    assert halve(5) == 2\n"
+        "    assert halve(0) == 0\n"
+        "\n"
+        "def test_double_is_still_callable():\n"
+        "    assert callable(double)\n"
+    )
+    _commit(tiny_repo, "feat: halve, plus one test that proves nothing")
+    report = run(tiny_repo, "main", cfg=Config.load(tiny_repo))
+
+    by_start = {
+        v.hunk.new_start: v
+        for v in report.verdicts
+        if v.hunk.path == "tests/test_lib.py"
+    }
+    real_test = by_start[8]
+    empty_test = by_start[13]
+
+    assert real_test.verdict is Verdict.VERIFIED, real_test.reasons
+    assert empty_test.verdict is Verdict.RESIDUAL
+    # It references only `double`, which this PR did not touch, so the check
+    # rejects it without needing to run it.
+    assert any("references nothing this change touched" in r for r in empty_test.reasons)
+
+
+def test_non_python_files_say_why_they_cannot_be_checked(tiny_repo):
+    git(tiny_repo, "checkout", "-qb", "shell-feature")
+    (tiny_repo / "deploy.sh").write_text("#!/bin/sh\nrm -rf \"$TARGET\"\n")
+    _commit(tiny_repo, "feat: a deploy script")
+    report = run(tiny_repo, "main", cfg=Config.load(tiny_repo))
+
+    hunk = next(v for v in report.verdicts if v.hunk.path == "deploy.sh")
+    assert hunk.verdict is Verdict.RESIDUAL
+    assert any("no analyser for .sh" in r for r in hunk.reasons), hunk.reasons
