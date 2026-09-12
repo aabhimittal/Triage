@@ -69,6 +69,36 @@ The check is conclusive only for *newly added* tests. An edit to an existing
 test can weaken it while still failing against old code, because the PR changed
 the behaviour it covers; those stay residual.
 
+**Crash?** The only check that is about the code. Run the changed function on
+inputs drawn from its own annotations and report any exception the author never
+asked for. This is the first thing in TRIAGE that can find a defect rather than
+diagnose a missing test, and the demo case is the one that justifies it:
+`average_price(prices)` is 100% covered with every mutant killed, and dies on an
+empty cart. All three test-adequacy checks certify it. Only running it does not.
+
+## 2b. Credentials and vetoes
+
+Adding a check that reports on code rather than tests forces a refinement of the
+invariant, and it is worth stating precisely because a sloppy version of it
+would undo the whole safety argument.
+
+*Credentialing* checks -- covered, constrained, equivalent, effective -- can
+grant verification. The invariant applies to them unchanged: every applicable
+one must actively PASS, and ABSTAIN disqualifies exactly like FAIL.
+
+*Veto* checks -- crash -- can only take verification away. The asymmetry follows
+from what the evidence is worth in each direction. A crash on a generated input
+is a demonstrated fact about the code, with a counterexample attached: strong
+evidence a human is needed. No crash across two hundred inputs is weak evidence
+of nothing much, since the input space is unbounded and the generator is naive.
+If a PASS there could help verify a hunk, weak evidence would be laundered into
+a safety claim -- the precise failure this tool exists to prevent.
+
+One consequence worth noting: a *proved* refactor outranks the veto. If the new
+code is observably identical to the old, any crash it has is one the codebase
+already had, and blaming this PR for it would flag every refactor that brushes
+against long-standing fragile code.
+
 ## 3. The safety argument
 
 Everything rests on one asymmetry. Two ways to be wrong:
@@ -193,7 +223,7 @@ data.
 **Do not read the absolute numbers as probabilities.** The ordering is the
 product.
 
-## 8. Evaluation
+## 8. Evaluation, part one: mutants
 
 The experiment in one line: *only bugs that survive CI are review problems, so
 measure what fraction of those TRIAGE routes to a human.*
@@ -254,6 +284,12 @@ the first reviewer who runs it on a legacy module.
 - **A fitted model in the box.** The fitter exists and refuses small samples,
   which means shipping fitted weights requires evaluation runs across many real
   PRs. That data does not exist yet, so the priors are still what ships.
-- **Property-based assertions.** The equivalence check generates inputs but only
-  compares two implementations. Checking a single implementation against stated
-  invariants would extend the same machinery to non-refactor changes.
+- **Stated invariants.** The crash check asks only "does it blow up". A
+  `# triage: invariant: result >= 0` annotation would let the same generator
+  check properties the author cares about, which is the natural next step and
+  the one that would catch wrong-requirement bugs like the `overtime_pay` miss
+  -- but only if someone writes the invariant down, which is the whole
+  difficulty.
+- **SZZ refinements.** Ignoring cosmetic-only commits when blaming, and
+  weighting by how many independent fixes implicate the same commit, are both
+  cheap and both unimplemented.

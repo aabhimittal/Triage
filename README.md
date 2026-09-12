@@ -21,6 +21,8 @@ PR diff -> hunks
    |                 generated inputs; every result must match
    |-- Effective?    for test code: revert the definitions this test
    |                 references; a test that still passes proves nothing
+   |-- Crash?        run the new code on inputs its own signature admits;
+   |                 an unasked-for exception is a defect, not a test gap
    v
 Residual set R = hunks that fail *or cannot answer* any check
 -> "review 16 of 34 changed lines"
@@ -51,8 +53,9 @@ See it work end to end on generated repos. Two scenarios, because one number in
 isolation misleads:
 
 ```bash
-bash scripts/demo.sh mature   # a disciplined change: 97% verified, 1 line to review
-bash scripts/demo.sh mixed    # one of every hard case: 53% verified, 16 lines
+bash scripts/demo.sh mature    # a disciplined change: 97% verified, 1 line to review
+bash scripts/demo.sh mixed     # one of every hard case: 50% verified, 22 lines
+bash scripts/demo.sh history   # plants two real bugs, then rediscovers them by blame
 ```
 
 ## What the output looks like
@@ -90,6 +93,14 @@ commit. The product is the residual list; the number is context.
 | **constrained** | would any test notice if these lines were wrong? | ABSTAIN (too few mutants, budget spent, selected tests not green on their own) |
 | **equivalent** | does a *declared refactor* actually preserve behaviour? | ABSTAIN (impure, unannotated, nondeterministic) |
 | **effective** | does this test detect anything the change did? | ABSTAIN (edit to an existing test, or not inside a test function) |
+| **crash** | does the code raise something unasked-for on an input its signature admits? | ABSTAIN (impure or unannotated) |
+
+The first four are **credentialing** checks: they can grant verification, and
+the invariant applies to them in full. `crash` is a **veto**: it can only take
+verification away. A crash found on generated inputs is strong evidence a human
+is needed; the absence of one over a few hundred inputs is weak evidence of
+nothing, so a PASS there credentials nothing and an ABSTAIN costs nothing.
+Letting weak evidence verify is the failure this tool exists to prevent.
 
 The fourth one exists because test code cannot be verified by the suite that
 contains it. The one question that *is* mechanically answerable: revert the
@@ -144,6 +155,64 @@ Sweeping the risk threshold traces the whole trade-off curve between review
 burden and escape rate; the product claim is one point on it. Raising
 `mutation_threshold` to 1.0 pushes escapes toward zero and burden up.
 
+## Catching real bugs, not just test gaps
+
+Four of the five checks measure the *tests*. They can tell you nothing would
+notice if the code were wrong; they cannot tell you it is wrong. Two things
+address that directly.
+
+**The crash check finds defects.** This is what it looks like when every
+test-adequacy signal says a hunk is fine and the code is broken anyway:
+
+```
+[0.71] cart.py:35-40 (behavioral)   covered: PASS   constrained: PASS
+   - crash: average_price(prices=[]) raises ZeroDivisionError: division by
+     zero. The signature admits this input and the function never raises or
+     catches that type deliberately
+```
+
+100% covered, every mutant killed. Every earlier version of TRIAGE marked that
+hunk verified.
+
+**`triage bugs` replays your repository's own history.** Mutants are a proxy for
+bugs and a poor one. This uses real defects instead, via SZZ: find commits whose
+message says they fix a bug, `git blame` the lines they changed back to the
+commit that wrote them, replay that commit as a pull request, and ask whether
+TRIAGE put the offending lines in front of a human.
+
+```bash
+triage bugs --repo . --scan 300 --max-bugs 5
+```
+
+```
+bug-fix commits      2
+bug-inducing commits 2 (blamed from the lines those fixes changed)
+  CAUGHT             1  the buggy lines were routed to a human
+  MISSED             1  the buggy lines sat in a verified hunk
+  catch rate         50%
+  review burden      53% of changed lines on those commits
+
+MISSES (the only number that matters):
+  59b6262432 feat: overtime pay
+    bug at sched.py:21; the hunk holding the bug was marked verified
+    later fixed by c18b13be70 fix: overtime was paid at double time, not
+                              time and a half
+```
+
+That miss is not a bug in TRIAGE. The overtime function was fully covered, every
+mutant was killed, and *the tests asserted the wrong rule* — the author
+misunderstood the requirement and encoded the misunderstanding in both places.
+No test-adequacy signal can see that, and neither can a mutant. Reporting it as
+a miss is the point: this is the honest denominator the mutant-based numbers
+could never give.
+
+Caveats that come with the method, not with this implementation: SZZ blame
+fingers whoever last touched a line, so a reformat can be blamed instead of the
+author; commit messages are a weak oracle (TRIAGE's own history matches *zero*
+fix commits, since its authors wrote "Make the budget bind" rather than "fix");
+the suite at an old commit may not run today, and those are skipped and counted;
+and only bugs that were eventually found and fixed appear at all.
+
 ## Calibrating the ranking
 
 The shipped risk weights are hand-set priors. To replace them with fitted ones:
@@ -185,6 +254,14 @@ These are real, and none of them are fixed by trying harder:
 - **Edited tests are never verified**, only newly added ones: a test can be
   weakened and still fail against the old code, because the PR also changed the
   behaviour it covers.
+- **The crash check has a real false-positive mode.** A function with an
+  undocumented precondition ("callers always pass a non-empty list") gets
+  flagged for the empty list its annotation admits. Python has no precondition
+  language to read, so the choice is to flag those or to miss the real ones.
+  It flags, with a counterexample a reviewer dismisses in seconds, and
+  `# triage: allow-crash` silences it. It also refuses to blame a *proved*
+  refactor for a crash, since an unchanged behaviour means the crash predates
+  the PR.
 - **Python only**, for everything except the coverage gate. Non-Python files are
   residual by design and say so — "no analyser for .sh files" — rather than
   arriving there through a misleading coverage message.

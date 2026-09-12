@@ -8,9 +8,12 @@
 # of TRIAGE and not of the diff. The same tool reports 60% on a half-tested
 # change and 90%+ on a disciplined one, and you have to see both to read either.
 #
-#   mixed  - one of every interesting case; the tool's behaviour under stress
-#   mature - a well-tested change; the actual value proposition, where the
-#            residual set is small enough that reviewing it is cheap
+#   mixed   - one of every interesting case; the tool's behaviour under stress
+#   mature  - a well-tested change; the actual value proposition, where the
+#             residual set is small enough that reviewing it is cheap
+#   history - two real bugs, each introduced in one commit and fixed in a
+#             later one, for `triage bugs` to rediscover by blame. One is the
+#             kind TRIAGE catches; one is the kind it provably cannot.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCENARIO="${1:-mixed}"
@@ -129,6 +132,14 @@ def tax(amount: float, rate_pct: float) -> float:
     if amount < 0.0:
         raise ValueError("amount must not be negative")
     return round(amount * rate_pct / 100.0, 2)
+
+
+def average_price(prices: list[float]) -> float:
+    """7. Fully covered, every mutant killed, and it dies on an empty cart.
+
+    No test-adequacy signal can see this. Only running the code can.
+    """
+    return sum(prices) / len(prices)
 PY
   cat >> tests/test_cart.py <<'PY'
 
@@ -157,16 +168,124 @@ def test_tax_rounds_to_cents():
 def test_tax_rejects_negative_amounts():
     with pytest.raises(ValueError):
         tax(-0.01, 10.0)
+
+
+def test_average_price():
+    assert average_price([2.0, 4.0]) == 3.0
+    assert average_price([5.0]) == 5.0
+    assert average_price([1.0, 2.0, 6.0]) == 3.0
 PY
   python3 - <<'PY'
 import pathlib
 p = pathlib.Path("tests/test_cart.py")
 p.write_text(p.read_text().replace(
     "from cart import apply_discount, subtotal",
-    "from cart import apply_discount, shipping_fee, subtotal, tax"))
+    "from cart import apply_discount, average_price, shipping_fee, subtotal, tax"))
 PY
   printf '\nShipping is charged per order.\n' >> README.md
   git add -A && git commit -qm "feat: shipping fees, loyalty points and tax"
+
+elif [ "$SCENARIO" = "history" ]; then
+  # ---------------------------------------------------------------- base ----
+  cat > sched.py <<'PY'
+"""A scheduling helper, at the base commit."""
+
+
+def clamp(value: int, low: int, high: int) -> int:
+    if value < low:
+        return low
+    if value > high:
+        return high
+    return value
+PY
+  cat > tests/test_sched.py <<'PY'
+from sched import clamp
+
+
+def test_clamp():
+    assert clamp(5, 0, 10) == 5
+    assert clamp(-1, 0, 10) == 0
+    assert clamp(11, 0, 10) == 10
+PY
+  write_config
+  git add -A && git commit -qm "initial scheduler"
+  git branch -M main
+
+  # --- BUG 1: untested code. TRIAGE should route this to a human. ----------
+  cat >> sched.py <<'PY'
+
+
+def slots_needed(items: int, per_slot: int) -> int:
+    """How many slots to fit every item. Off by one when it divides evenly."""
+    return items // per_slot + 1
+PY
+  git add -A && git commit -qm "feat: compute how many slots a batch needs"
+
+  # --- BUG 2: thoroughly tested, and the tests encode the wrong rule. -------
+  #     Mutation testing kills every mutant here, coverage is total, and the
+  #     code still does the wrong thing. This is the class of defect no
+  #     test-adequacy signal can see.
+  cat >> sched.py <<'PY'
+
+
+def overtime_pay(hours: int, rate: int) -> int:
+    """Overtime is paid above 40 hours a week, at time and a half."""
+    if hours <= 40:
+        return hours * rate
+    return 40 * rate + (hours - 40) * rate * 2
+PY
+  cat >> tests/test_sched.py <<'PY'
+
+
+def test_overtime_pay():
+    assert overtime_pay(40, 10) == 400
+    assert overtime_pay(0, 10) == 0
+    assert overtime_pay(41, 10) == 420
+    assert overtime_pay(50, 10) == 600
+PY
+  python3 - <<'PY'
+import pathlib
+p = pathlib.Path("tests/test_sched.py")
+p.write_text(p.read_text().replace(
+    "from sched import clamp", "from sched import clamp, overtime_pay"))
+PY
+  git add -A && git commit -qm "feat: overtime pay"
+
+  # --- the fixes, later ----------------------------------------------------
+  python3 - <<'PY'
+import pathlib
+p = pathlib.Path("sched.py")
+p.write_text(p.read_text().replace(
+    "    return items // per_slot + 1",
+    "    return -(-items // per_slot)"))
+PY
+  cat >> tests/test_sched.py <<'PY'
+
+
+def test_slots_needed():
+    from sched import slots_needed
+    assert slots_needed(10, 5) == 2
+    assert slots_needed(11, 5) == 3
+    assert slots_needed(0, 5) == 0
+PY
+  git add -A && git commit -qm "fix: slots_needed was off by one on exact multiples"
+
+  python3 - <<'PY'
+import pathlib
+p = pathlib.Path("sched.py")
+p.write_text(p.read_text().replace(
+    "    return 40 * rate + (hours - 40) * rate * 2",
+    "    return 40 * rate + (hours - 40) * rate * 3 // 2"))
+p = pathlib.Path("tests/test_sched.py")
+p.write_text(p.read_text()
+    .replace("assert overtime_pay(41, 10) == 420", "assert overtime_pay(41, 10) == 415")
+    .replace("assert overtime_pay(50, 10) == 600", "assert overtime_pay(50, 10) == 550"))
+PY
+  git add -A && git commit -qm "fix: overtime was paid at double time, not time and a half"
+
+  echo "=== demo repo ($SCENARIO): $WORK ==="
+  cd "$WORK" && PYTHONPATH="$HERE" python3 -m triage.cli bugs --repo "$WORK" --max-bugs 4
+  exit 0
 
 else
   # ---------------------------------------------------------------- base ----

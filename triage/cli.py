@@ -47,6 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="write labelled hunks here, for `triage fit`",
     )
 
+    bugs_cmd = sub.add_parser(
+        "bugs",
+        help="replay this repo's own historical bugs and measure the catch rate",
+    )
+    bugs_cmd.add_argument("--repo", default=".", type=Path)
+    bugs_cmd.add_argument("--scan", type=int, default=300, help="commits to search for fixes")
+    bugs_cmd.add_argument("--max-bugs", type=int, default=5, help="bug-inducing commits to replay")
+    bugs_cmd.add_argument("--budget", type=float, default=1800.0, help="study budget, seconds")
+    bugs_cmd.add_argument("--format", choices=["text", "json"], default="text")
+    bugs_cmd.add_argument("--out", type=Path)
+
     fit_cmd = sub.add_parser(
         "fit", help="fit risk-ranking weights from one or more eval datasets"
     )
@@ -84,6 +95,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.fail_on_residual and result.residual:
             return 1
         return 0 if result.suite_green else 2
+
+    if args.command == "bugs":
+        from triage.history import format_report, study
+
+        outcome = study(
+            repo, cfg, scan=args.scan, max_bugs=args.max_bugs,
+            budget_seconds=args.budget,
+        )
+        text = (
+            json.dumps(outcome.to_dict(), indent=2)
+            if args.format == "json" else format_report(outcome)
+        )
+        if args.out:
+            args.out.write_text(text)
+            print(f"wrote {args.out}", file=sys.stderr)
+        else:
+            print(text)
+        return 0
 
     if args.command == "eval":
         from triage.evaluate import evaluate, format_curve

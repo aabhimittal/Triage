@@ -10,6 +10,7 @@ from triage import gitutil
 from triage.budget import Budget
 from triage.checks import (
     coverage_check,
+    crash_check,
     equivalence_check,
     mutation_check,
     test_effect_check,
@@ -245,10 +246,12 @@ def _run_checks(
             "not evaluated: lines are not covered, so no test could kill a mutant",
         ))
 
+    new_source = (workdir / hunk.path).read_text() if (workdir / hunk.path).exists() else ""
     if hunk.label is Label.REFACTOR:
-        new_source = (workdir / hunk.path).read_text() if (workdir / hunk.path).exists() else ""
         old_source = gitutil.show(repo, gitutil.merge_base(repo, base), hunk.path)
         checks.append(equivalence_check.check(hunk, old_source, new_source, cfg))
+    if cfg.crash_check:
+        checks.append(crash_check.check(hunk, new_source, cfg))
     return checks
 
 
