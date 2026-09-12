@@ -37,6 +37,10 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "mutant_survival": 2.0,
     # A refactor that provably is not one. Rare, and nearly always a real bug.
     "broken_refactor_claim": 3.0,
+    # A reproducible crash on an input the signature admits. The only feature
+    # here that is evidence about the code rather than about its tests, which
+    # is why it outranks everything except a disproved refactor claim.
+    "crashes": 2.6,
     # A test demonstrated to detect nothing the change did. Not a bug in the
     # product, but a hole in the evidence the PR claims to be adding, and the
     # one finding a reviewer can act on immediately.
@@ -109,6 +113,9 @@ def features(
     effective = by_name.get("effective")
     ineffective = 1.0 if (effective is not None and effective.status is Status.FAIL) else 0.0
 
+    crash = by_name.get("crash")
+    crashes = 1.0 if (crash is not None and crash.status is Status.FAIL) else 0.0
+
     inconclusive = [c for c in checks if c.status is Status.ABSTAIN]
     applicable = [c for c in checks if c.status is not Status.SKIP] or [None]
     unknown_frac = len(inconclusive) / len(applicable)
@@ -118,6 +125,7 @@ def features(
         "mutant_survival": survival,
         "broken_refactor_claim": broken_refactor,
         "ineffective_test": ineffective,
+        "crashes": crashes,
         "unknown_frac": unknown_frac,
         "size": min(1.0, hunk.size / 50.0),
         "branchiness": _branchiness(text),

@@ -4,10 +4,23 @@ This is the whole safety argument of the system, so it is deliberately a small
 pure function with no I/O: it is the thing you should read first and test
 hardest.
 
-    VERIFIED  every applicable check actively PASSED
+    VERIFIED  every applicable *credentialing* check actively PASSED
     RESIDUAL  anything else -- a FAIL, an ABSTAIN, a red suite, a label we
-              cannot verify by running code
+              cannot verify by running code, or a veto
     EXEMPT    no executable content at all
+
+Checks come in two kinds, and conflating them would break the argument:
+
+*Credentialing* checks (covered, constrained, equivalent, effective) can grant
+verification. The invariant applies to them in full: every applicable one must
+actively PASS, and ABSTAIN is as disqualifying as FAIL.
+
+*Veto* checks (crash) can only take verification away. A crash found by
+generated inputs is strong evidence that a hunk needs a human; the absence of
+one over a few hundred inputs is weak evidence of nothing, so a PASS there
+credentials nothing and an ABSTAIN costs nothing. Allowing weak evidence to
+verify is precisely the failure this tool exists to prevent, so the asymmetry
+is deliberate rather than an oversight.
 
 The asymmetry is the point. FAIL and ABSTAIN land in the same bucket because
 "the tests do not constrain this" and "we could not tell whether the tests
@@ -18,6 +31,9 @@ one of them is a defect signal.
 from __future__ import annotations
 
 from triage.model import CheckResult, Hunk, HunkVerdict, Label, Status, Verdict
+
+# Checks that may demote a hunk but never promote one. See the module docstring.
+VETO_CHECKS = frozenset({"crash"})
 
 _SUITE_RED = (
     "the test suite does not pass at head, so no test-based evidence means "
@@ -81,8 +97,9 @@ def decide(
     covered = _get(checks, "covered")
     constrained = _get(checks, "constrained")
     equivalent = _get(checks, "equivalent")
+    credentials = [c for c in checks if c.name not in VETO_CHECKS]
 
-    if _all_skipped(checks):
+    if _all_skipped(credentials):
         return HunkVerdict(hunk, Verdict.EXEMPT, checks)
 
     # A refactor proved equivalent on generated inputs needs no coverage
@@ -92,11 +109,23 @@ def decide(
     # claimed behaviour preservation in the first place.
     if hunk.label is Label.REFACTOR and equivalent is not None:
         if equivalent.status is Status.PASS:
+            # Note this outranks the crash veto, and should. If the new code is
+            # observably identical to the old, any crash it has is one the
+            # codebase already had; blaming this PR for it would flag every
+            # refactor that happens to touch long-standing fragile code, and
+            # send reviewers to read a diff that changed nothing.
             return HunkVerdict(hunk, Verdict.VERIFIED, checks)
         if equivalent.status is Status.FAIL:
             return HunkVerdict(hunk, Verdict.RESIDUAL, checks)
 
-    required = [c for c in (covered, constrained) if c is not None and c.status is not Status.SKIP]
+    vetoed = [c for c in checks if c.name in VETO_CHECKS and c.status is Status.FAIL]
+    if vetoed:
+        return HunkVerdict(hunk, Verdict.RESIDUAL, checks)
+
+    required = [
+        c for c in (covered, constrained)
+        if c is not None and c.status is not Status.SKIP
+    ]
     if not required:
         return HunkVerdict(hunk, Verdict.RESIDUAL, checks)
     if all(c.status is Status.PASS for c in required):

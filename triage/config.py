@@ -30,6 +30,8 @@ class Config:
     max_mutants_per_hunk: int = 12
     mutant_timeout_seconds: float = 30.0
     equivalence_cases: int = 64
+    crash_cases: int = 200
+    crash_check: bool = True
     equivalence_timeout_seconds: float = 5.0
 
     # --- scope ----------------------------------------------------------
@@ -40,6 +42,13 @@ class Config:
         ]
     )
     risk_weights_path: str | None = None
+
+    # --- historical bug study -------------------------------------------
+    # Which commit subjects count as bug fixes. The default catches the common
+    # conventions; a team whose messages read "correct the rounding" rather
+    # than "fix rounding" gets nothing from it, which is a limit of the oracle
+    # and not of the repository. TRIAGE's own history matches zero commits.
+    fix_pattern: str = r"\b(fix(e[sd])?|bug|regression|hotfix|broken|crash|incorrect|wrong)\b"
 
     @classmethod
     def load(cls, repo: Path) -> "Config":

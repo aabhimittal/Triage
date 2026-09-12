@@ -23,32 +23,15 @@ from __future__ import annotations
 
 import ast
 import random
-import signal
-import threading
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from triage import inputs, purity
 from triage.classify import enclosing_definitions
 from triage.config import Config
 from triage.model import CheckResult, Hunk, Status
+from triage.sandbox import Timeout, fmt_args, invoke, materialize, same
 
 NAME = "equivalent"
-
-
-class _Timeout(Exception):
-    pass
-
-
-@dataclass
-class _Outcome:
-    kind: str          # "value" | "raise"
-    payload: Any
-
-    def describe(self) -> str:
-        if self.kind == "raise":
-            return f"{type(self.payload).__name__}({self.payload})"
-        return repr(self.payload)
 
 
 def check(hunk: Hunk, old_source: str | None, new_source: str, cfg: Config) -> CheckResult:
@@ -95,8 +78,8 @@ def check(hunk: Hunk, old_source: str | None, new_source: str, cfg: Config) -> C
             )
 
     try:
-        old_fn = _materialize(old_tree, func_old)
-        new_fn = _materialize(new_tree, func_new)
+        old_fn, _ = materialize(old_tree, func_old)
+        new_fn, _ = materialize(new_tree, func_new)
     except Exception as exc:  # noqa: BLE001 - any failure here means "we can't tell"
         return CheckResult(NAME, Status.ABSTAIN, f"could not load function: {exc!r}", {})
 
@@ -108,30 +91,30 @@ def check(hunk: Hunk, old_source: str | None, new_source: str, cfg: Config) -> C
 
     checked = 0
     for args in cases:
-        first = _invoke(new_fn, args, cfg.equivalence_timeout_seconds)
-        second = _invoke(new_fn, args, cfg.equivalence_timeout_seconds)
-        if not _same(first, second):
+        first = invoke(new_fn, args, cfg.equivalence_timeout_seconds)
+        second = invoke(new_fn, args, cfg.equivalence_timeout_seconds)
+        if not same(first, second):
             return CheckResult(
                 NAME, Status.ABSTAIN,
                 f"'{func_new.name}' is nondeterministic: two calls on "
-                f"{_fmt_args(args)} gave {first.describe()} and {second.describe()}",
+                f"{fmt_args(args)} gave {first.describe()} and {second.describe()}",
                 {"function": func_new.name},
             )
-        old_out = _invoke(old_fn, args, cfg.equivalence_timeout_seconds)
-        if isinstance(old_out.payload, _Timeout) or isinstance(first.payload, _Timeout):
+        old_out = invoke(old_fn, args, cfg.equivalence_timeout_seconds)
+        if isinstance(old_out.payload, Timeout) or isinstance(first.payload, Timeout):
             return CheckResult(
                 NAME, Status.ABSTAIN,
-                f"execution timed out on {_fmt_args(args)}", {"function": func_new.name},
+                f"execution timed out on {fmt_args(args)}", {"function": func_new.name},
             )
         checked += 1
-        if not _same(old_out, first):
+        if not same(old_out, first):
             return CheckResult(
                 NAME, Status.FAIL,
-                f"not equivalent: {func_new.name}{_fmt_args(args)} returned "
+                f"not equivalent: {func_new.name}{fmt_args(args)} returned "
                 f"{old_out.describe()} before and {first.describe()} after",
                 {
                     "function": func_new.name,
-                    "counterexample": _fmt_args(args),
+                    "counterexample": fmt_args(args),
                     "before": old_out.describe(),
                     "after": first.describe(),
                     "cases_checked": checked,
@@ -193,103 +176,3 @@ def _build_cases(
     ]
 
 
-def _materialize(tree: ast.Module, func: ast.FunctionDef) -> Callable[..., Any]:
-    """Build a minimal module containing only the function and its pure deps.
-
-    Executing the *whole* original module would run its imports and any
-    top-level statements, which is exactly the kind of side effect this check
-    exists to avoid.
-    """
-    report = purity.analyze(func, tree)
-    needed = set(report.dependencies)
-    body: list[ast.stmt] = []
-    for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            body.append(node)
-        elif isinstance(node, ast.FunctionDef) and node.name in needed and node is not func:
-            body.append(node)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            names = {
-                t.id for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
-                if isinstance(t, ast.Name)
-            }
-            if names & needed:
-                body.append(node)
-    body.append(func)
-    module = ast.Module(body=body, type_ignores=[])
-    ast.fix_missing_locations(module)
-    namespace: dict[str, Any] = {"__name__": "triage_equiv"}
-    exec(compile(module, "<triage-equiv>", "exec"), namespace)  # noqa: S102
-    return namespace[func.name]
-
-
-def _invoke(fn: Callable[..., Any], kwargs: dict[str, Any], timeout: float) -> _Outcome:
-    with _time_limit(timeout):
-        try:
-            return _Outcome("value", fn(**kwargs))
-        except _Timeout as exc:
-            return _Outcome("raise", exc)
-        except RecursionError as exc:
-            return _Outcome("raise", exc)
-        except Exception as exc:  # noqa: BLE001 - exceptions are part of behaviour
-            return _Outcome("raise", exc)
-
-
-class _time_limit:
-    """SIGALRM-based timeout; degrades to no timeout off the main thread."""
-
-    def __init__(self, seconds: float):
-        self.seconds = seconds
-        self.armed = (
-            seconds > 0
-            and threading.current_thread() is threading.main_thread()
-            and hasattr(signal, "SIGALRM")
-        )
-
-    def __enter__(self):
-        if self.armed:
-            self.previous = signal.signal(signal.SIGALRM, self._fire)
-            signal.setitimer(signal.ITIMER_REAL, self.seconds)
-        return self
-
-    def __exit__(self, *exc):
-        if self.armed:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, self.previous)
-        return False
-
-    @staticmethod
-    def _fire(signum, frame):
-        raise _Timeout("execution exceeded the equivalence time limit")
-
-
-def _same(a: _Outcome, b: _Outcome) -> bool:
-    if a.kind != b.kind:
-        return False
-    if a.kind == "raise":
-        return type(a.payload) is type(b.payload) and str(a.payload) == str(b.payload)
-    return _values_equal(a.payload, b.payload)
-
-
-def _values_equal(a: Any, b: Any) -> bool:
-    if isinstance(a, float) or isinstance(b, float):
-        try:
-            if a != a and b != b:  # NaN == NaN for our purposes
-                return True
-            return abs(float(a) - float(b)) <= 1e-9 * max(1.0, abs(float(a)), abs(float(b)))
-        except (TypeError, ValueError, OverflowError):
-            return False
-    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        return type(a) is type(b) and len(a) == len(b) and all(
-            _values_equal(x, y) for x, y in zip(a, b)
-        )
-    if isinstance(a, dict) and isinstance(b, dict):
-        return a.keys() == b.keys() and all(_values_equal(a[k], b[k]) for k in a)
-    try:
-        return type(a) is type(b) and bool(a == b)
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _fmt_args(kwargs: dict[str, Any]) -> str:
-    return "(" + ", ".join(f"{k}={v!r}" for k, v in kwargs.items()) + ")"

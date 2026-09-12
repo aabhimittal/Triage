@@ -22,3 +22,4 @@ include = ["triage*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: replays real commits; several seconds each"]
